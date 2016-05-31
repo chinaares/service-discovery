@@ -29,223 +29,212 @@ import java.util.concurrent.TimeUnit;
 /**
  * Created by mphilpot on 8/13/14.
  */
-public class ServiceDiscoveryEtcdImpl<T> implements ServiceDiscovery<T>
-{
-    private static final Logger log = Logger.getLogger(ServiceDiscoveryEtcdImpl.class);
+public class ServiceDiscoveryEtcdImpl<T> implements ServiceDiscovery<T> {
+	private static final Logger log = Logger.getLogger(ServiceDiscoveryEtcdImpl.class);
 
-    private final EtcdClient            client;
-    private final String basePath;
-    private final InstanceSerializer<T> serializer;
-    private final Map<String, ServiceInstance<T>> services  = Maps.newConcurrentMap();
-    private final Collection<ServiceCache<T>> caches    = Sets.newSetFromMap(Maps.<ServiceCache<T>, Boolean>newConcurrentMap());
-    private final Collection<ServiceProvider<T>> providers = Sets.newSetFromMap(Maps.<ServiceProvider<T>, Boolean>newConcurrentMap());
+	private final EtcdClient client;
+	private final String basePath;
+	private final InstanceSerializer<T> serializer;
+	private final Map<String, ServiceInstance<T>> services = Maps.newConcurrentMap();
+	private final Collection<ServiceCache<T>> caches = Sets
+			.newSetFromMap(Maps.<ServiceCache<T>, Boolean> newConcurrentMap());
+	private final Collection<ServiceProvider<T>> providers = Sets
+			.newSetFromMap(Maps.<ServiceProvider<T>, Boolean> newConcurrentMap());
 
-    private final ScheduledExecutorService executor;
-    private final Map<String, ScheduledFuture> futures = Maps.newConcurrentMap();
+	private final ScheduledExecutorService executor;
+	private final Map<String, ScheduledFuture> futures = Maps.newConcurrentMap();
 
-    public ServiceDiscoveryEtcdImpl(EtcdClient client, String basePath, InstanceSerializer<T> serializer, ServiceInstance<T> thisInstance)
-    {
-        this.client = client;
-        this.basePath = basePath;
-        this.serializer = serializer;
+	public ServiceDiscoveryEtcdImpl(EtcdClient client, String basePath, InstanceSerializer<T> serializer,
+			ServiceInstance<T> thisInstance) {
+		this.client = client;
+		this.basePath = basePath;
+		this.serializer = serializer;
 
-        executor = Executors.newSingleThreadScheduledExecutor();
+		executor = Executors.newSingleThreadScheduledExecutor();
 
-        if (thisInstance != null)
-        {
-            services.put(thisInstance.getId(), thisInstance);
-        }
-    }
+		if (thisInstance != null) {
+			services.put(thisInstance.getId(), thisInstance);
+		}
+	}
 
-    @Override
-    public void start() throws Exception
-    {
-        reRegisterServices();
-    }
+	@Override
+	public void start() throws Exception {
+		reRegisterServices();
+	}
 
-    @Override
-    public void registerService(ServiceInstance<T> service) throws Exception
-    {
-        services.put(service.getId(), service);
-        internalRegisterService(service);
-    }
+	@Override
+	public void registerService(ServiceInstance<T> service) throws Exception {
+		services.put(service.getId(), service);
+		internalRegisterService(service);
+	}
 
-    @Override
-    public void updateService(ServiceInstance<T> service) throws Exception
-    {
-        Preconditions.checkArgument(services.containsKey(service.getId()), "Service is not registered: " + service);
+	@Override
+	public void updateService(ServiceInstance<T> service) throws Exception {
+		Preconditions.checkArgument(services.containsKey(service.getId()), "Service is not registered: " + service);
 
-        byte[]          bytes = serializer.serialize(service);
-        String path = String.format("%s/instance", pathForInstance(service.getName(), service.getId()));
+		byte[] bytes = serializer.serialize(service);
+		String path = String.format("%s/instance", pathForInstance(service.getName(), service.getId()));
 
-        client.set(path, Base64.encodeBase64String(bytes));
-    }
+		client.set(path, Base64.encodeBase64String(bytes));
+		registerServiceProperties(service, path);
+	}
 
-    @Override
-    public void unregisterService(ServiceInstance<T> service) throws Exception
-    {
-        String path = pathForInstance(service.getName(), service.getId());
+	@Override
+	public void unregisterService(ServiceInstance<T> service) throws Exception {
+		String path = pathForInstance(service.getName(), service.getId());
 
-        services.remove(service.getId());
-        futures.remove(service.getId()).cancel(true);
+		services.remove(service.getId());
+		futures.remove(service.getId()).cancel(true);
 
-        client.deleteDirectoryRecursive(path);
-    }
+		client.deleteDirectoryRecursive(path);
+	}
 
-    @Override
-    public ServiceCacheBuilder<T> serviceCacheBuilder()
-    {
-        return new ServiceCacheBuilderImpl<T>(this)
-                .threadFactory(ThreadUtils.newThreadFactory("ServiceCache"));
-    }
+	@Override
+	public ServiceCacheBuilder<T> serviceCacheBuilder() {
+		return new ServiceCacheBuilderImpl<T>(this).threadFactory(ThreadUtils.newThreadFactory("ServiceCache"));
+	}
 
-    @Override
-    public Collection<String> queryForNames() throws Exception
-    {
-        List<String> names = new ArrayList<>();
+	@Override
+	public Collection<String> queryForNames() throws Exception {
+		List<String> names = new ArrayList<>();
 
-        for(EtcdNode node : client.listDirectory(basePath))
-        {
-            names.add(node.getKey().replace(basePath+"/", ""));
-        }
+		for (EtcdNode node : client.listDirectory(basePath)) {
+			names.add(node.getKey().replace(basePath + "/", ""));
+		}
 
-        return ImmutableList.copyOf(names);
-    }
+		return ImmutableList.copyOf(names);
+	}
 
-    @Override
-    public Collection<ServiceInstance<T>> queryForInstances(String name) throws Exception
-    {
-        ImmutableList.Builder<ServiceInstance<T>> builder = ImmutableList.builder();
+	@Override
+	public Collection<ServiceInstance<T>> queryForInstances(String name) throws Exception {
+		ImmutableList.Builder<ServiceInstance<T>> builder = ImmutableList.builder();
 
-        for(EtcdNode node : client.listDirectory(pathForName(name)))
-        {
-            ServiceInstance<T> instance = queryForInstance(name, node.getKey().replace(String.format("%s/%s/", basePath, name), ""));
-            if(instance != null)
-            {
-                builder.add(instance);
-            }
-        }
+		for (EtcdNode node : client.listDirectory(pathForName(name))) {
+			ServiceInstance<T> instance = queryForInstance(name,
+					node.getKey().replace(String.format("%s/%s/", basePath, name), ""));
+			if (instance != null) {
+				builder.add(instance);
+			}
+		}
 
-        return builder.build();
-    }
+		return builder.build();
+	}
 
-    @Override
-    public ServiceInstance<T> queryForInstance(String name, String id) throws Exception
-    {
-        EtcdResult result = client.get(String.format("%s/instance", pathForInstance(name, id)));
+	@Override
+	public ServiceInstance<T> queryForInstance(String name, String id) throws Exception {
+		EtcdResult result = client.get(String.format("%s/instance", pathForInstance(name, id)));
 
-        String b64Instance = result.getNode().getValue();
+		String b64Instance = result.getNode().getValue();
 
-        byte[] bytes = Base64.decodeBase64(b64Instance);
+		byte[] bytes = Base64.decodeBase64(b64Instance);
 
-        return serializer.deserialize(bytes);
-    }
+		return serializer.deserialize(bytes);
+	}
 
-    @Override
-    public ServiceProviderBuilder<T> serviceProviderBuilder()
-    {
-        return new ServiceProviderBuilderImpl<T>(this)
-                .providerStrategy(new RoundRobinStrategy<T>())
-                .threadFactory(ThreadUtils.newThreadFactory("ServiceProvider"));
-    }
+	@Override
+	public ServiceProviderBuilder<T> serviceProviderBuilder() {
+		return new ServiceProviderBuilderImpl<T>(this).providerStrategy(new RoundRobinStrategy<T>())
+				.threadFactory(ThreadUtils.newThreadFactory("ServiceProvider"));
+	}
 
-    @Override
-    public void close() throws IOException
-    {
-        // TODO when registration methods implemented, this must handle clean up
-        client.close();
-    }
+	@Override
+	public void close() throws IOException {
+		// TODO when registration methods implemented, this must handle clean up
+		client.close();
+	}
 
-    void    cacheOpened(ServiceCache<T> cache)
-    {
-        caches.add(cache);
-    }
+	void cacheOpened(ServiceCache<T> cache) {
+		caches.add(cache);
+	}
 
-    void    cacheClosed(ServiceCache<T> cache)
-    {
-        caches.remove(cache);
-    }
+	void cacheClosed(ServiceCache<T> cache) {
+		caches.remove(cache);
+	}
 
-    void    providerOpened(ServiceProvider<T> provider)
-    {
-        providers.add(provider);
-    }
+	void providerOpened(ServiceProvider<T> provider) {
+		providers.add(provider);
+	}
 
-    void    providerClosed(ServiceProvider<T> cache)
-    {
-        providers.remove(cache);
-    }
+	void providerClosed(ServiceProvider<T> cache) {
+		providers.remove(cache);
+	}
 
-    private void reRegisterServices() throws Exception
-    {
-        for ( ServiceInstance<T> service : services.values() )
-        {
-            internalRegisterService(service);
-        }
-    }
+	private void reRegisterServices() throws Exception {
+		for (ServiceInstance<T> service : services.values()) {
+			internalRegisterService(service);
+		}
+	}
 
-    @VisibleForTesting
-    protected void     internalRegisterService(ServiceInstance<T> service) throws Exception
-    {
-        final byte[]    bytes = serializer.serialize(service);
-        final String path = pathForInstance(service.getName(), service.getId());
+	@VisibleForTesting
+	protected void internalRegisterService(ServiceInstance<T> service) throws Exception {
+		final byte[] bytes = serializer.serialize(service);
+		final String path = pathForInstance(service.getName(), service.getId());
 
-        client.createDirectory(path, 30);
-        client.set(String.format("%s/instance", path), Base64.encodeBase64String(bytes));
+		client.createDirectory(path, 30);
+		client.set(String.format("%s/instance", path), Base64.encodeBase64String(bytes));
+		registerServiceProperties(service, path);
+		
+		ScheduledFuture future = executor.scheduleAtFixedRate(new Runnable() {
+			@Override
+			public void run() {
+				try {
+					client.refreshDirectory(path, 30);
+				} catch (EtcdClientException e) {
+					log.error("", e);
+					if (e.getStatusCode().equals(404)) {
+						try {
+							client.createDirectory(path, 30);
+							client.set(String.format("%s/instance", path), Base64.encodeBase64String(bytes));
+							registerServiceProperties(service, path);
+							
+						} catch (EtcdClientException e1) {
+							log.warn("", e1);
+						}
+					}
+				}
+			}
+		}, 5, 10, TimeUnit.SECONDS);
 
-        ScheduledFuture future = executor.scheduleAtFixedRate(new Runnable()
-        {
-            @Override
-            public void run()
-            {
-                try
-                {
-                    client.refreshDirectory(path, 30);
-                }
-                catch (EtcdClientException e)
-                {
-                    log.error("", e);
-                    if(e.getStatusCode().equals(404))
-                    {
-                        try
-                        {
-                            client.createDirectory(path, 30);
-                            client.set(String.format("%s/instance", path), Base64.encodeBase64String(bytes));
-                        }
-                        catch (EtcdClientException e1)
-                        {
-                            log.warn("", e1);
-                        }
-                    }
-                }
-            }
-        }, 5, 10, TimeUnit.SECONDS);
+		futures.put(service.getId(), future);
+	}
 
-        futures.put(service.getId(), future);
-    }
+	/**
+	 * 扩展便于支持其他应用来发现服务
+	 * 
+	 * @param service
+	 * @param path
+	 * @throws EtcdClientException
+	 */
+	private void registerServiceProperties(ServiceInstance<T> service, String path) throws EtcdClientException{
+		// extention to support other program easy discovery service
+		client.set(String.format("%s/id", path), service.getId());
+		client.set(String.format("%s/name", path), service.getName());
+		client.set(String.format("%s/address", path), service.getAddress());
+		client.set(String.format("%s/port", path), String.valueOf(service.getPort()));
+		client.set(String.format("%s/sslPort", path), String.valueOf(service.getSslPort()));
+		client.set(String.format("%s/payload", path), String.valueOf(service.getPayload()));
+		client.set(String.format("%s/registrationTimeUTC", path), String.valueOf(service.getRegistrationTimeUTC()));
+		client.set(String.format("%s/serviceType", path), service.getServiceType().name());
+		client.set(String.format("%s/uriSpec", path), service.buildUriSpec());
+	}
 
-    String pathForInstance(String name, String id)
-    {
-        return String.format("%s/%s/%s", basePath, name, id);
-    }
+	String pathForInstance(String name, String id) {
+		return String.format("%s/%s/%s", basePath, name, id);
+	}
 
-    String pathForName(String name)
-    {
-        return String.format("%s/%s", basePath, name);
-    }
+	String pathForName(String name) {
+		return String.format("%s/%s", basePath, name);
+	}
 
-    EtcdClient getClient()
-    {
-        return client;
-    }
+	EtcdClient getClient() {
+		return client;
+	}
 
-    String getBasePath()
-    {
-        return basePath;
-    }
+	String getBasePath() {
+		return basePath;
+	}
 
-    InstanceSerializer<T> getSerializer()
-    {
-        return serializer;
-    }
+	InstanceSerializer<T> getSerializer() {
+		return serializer;
+	}
 }
