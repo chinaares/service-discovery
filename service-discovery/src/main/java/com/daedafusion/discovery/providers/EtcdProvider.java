@@ -2,6 +2,7 @@ package com.daedafusion.discovery.providers;
 
 import com.daedafusion.configuration.Configuration;
 import com.daedafusion.discovery.DiscoveryProvider;
+import com.daedafusion.discovery.etcd.ClusterEtcdClientImpl;
 import com.daedafusion.discovery.etcd.ServiceDiscoveryEtcdBuilder;
 import com.daedafusion.jetcd.EtcdClient;
 import com.daedafusion.jetcd.EtcdClientFactory;
@@ -64,7 +65,10 @@ public class EtcdProvider implements DiscoveryProvider<String>
     @Override
     public void init() throws Exception
     {
-        EtcdClient client = EtcdClientFactory.newInstance();
+        //扩展支持etcd集群
+    	//EtcdClient client = EtcdClientFactory.newInstance();
+    	String uri = System.getProperty("etcdLocation", "http://localhost:2379");
+    	EtcdClient client = new ClusterEtcdClientImpl(uri);//应该采用Factory，但不想修改jetcd库，暂时这样吧
 
         String basePath = Configuration.getInstance().getString("serviceDiscovery.basePath", "/discovery");
 
